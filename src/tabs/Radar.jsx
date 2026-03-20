@@ -102,6 +102,7 @@ Para cada produto, retorne APENAS um JSON array (sem markdown, sem backticks, se
   "source": "onde foi identificado",
   "saturationRisk": "baixo|médio|alto",
   "searchTerm": "termo para buscar fornecedor no Alibaba/Brás",
+  "imageSearchTerm": "termo curto em inglês para buscar imagem do produto no Google Images (ex: 'kawaii eraser fruit shape', 'glow in dark stickers sheet')",
   "fitsIdealSlot": "nome do slot que preenche ou NENHUM",
   "dims": {"l": cm, "w": cm, "h": cm}
 }]
@@ -186,7 +187,15 @@ function CandidateCard({ item, onStatus, onRescore, onSendToEvaluator, loading }
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
             <span style={{ fontSize: 14, fontWeight: 700, color: "#2d3436" }}>{item.name}</span>
-            <StatusPill status={item.status || "PENDENTE"} />
+            {loopScore && (
+              <span style={{
+                display: "inline-block", padding: "2px 10px", borderRadius: 10,
+                fontSize: 10, fontWeight: 700,
+                background: (REC_COLORS[loopScore.rec] || "#636e72") + "20",
+                color: REC_COLORS[loopScore.rec] || "#636e72",
+                border: `1.5px solid ${REC_COLORS[loopScore.rec] || "#636e72"}`
+              }}>{loopScore.rec}</span>
+            )}
             <span style={{
               fontSize: 10, padding: "1px 7px", borderRadius: 6,
               background: h.bg, color: h.color, fontWeight: 600
@@ -201,14 +210,21 @@ function CandidateCard({ item, onStatus, onRescore, onSendToEvaluator, loading }
             {item.fitsIdealSlot && item.fitsIdealSlot !== "NENHUM" && (
               <span style={{ background: "#dfe6e9", padding: "0 6px", borderRadius: 6, fontWeight: 600 }}>🎯 {item.fitsIdealSlot}</span>
             )}
+            {/* Image search link */}
+            <a href={`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(item.imageSearchTerm || item.searchTerm || item.name)}`}
+              target="_blank" rel="noopener noreferrer"
+              onClick={e => e.stopPropagation()}
+              style={{ color: "#0984e3", textDecoration: "none", fontWeight: 600 }}>
+              🔎 Ver imagem
+            </a>
           </div>
         </div>
-        {/* Right: scores */}
-        <div style={{ minWidth: 90, textAlign: "right" }}>
-          {item.radarScore != null && <MiniScore score={item.radarScore} />}
+        {/* Right: Loop Score only */}
+        <div style={{ minWidth: 100, textAlign: "right" }}>
           {loopScore && (
-            <div style={{ fontSize: 10, color: "#666", marginTop: 2 }}>
-              Loop: {loopScore.score.toFixed(1)} · <span style={{ color: REC_COLORS[loopScore.rec] || "#999" }}>{loopScore.rec}</span>
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: REC_COLORS[loopScore.rec] || "#999" }}>{loopScore.score.toFixed(1)}</div>
+              <div style={{ fontSize: 9, color: "#999" }}>Score Loop</div>
             </div>
           )}
         </div>
@@ -300,6 +316,7 @@ export default function Radar({ skus, idealSlots, onSendToEvaluator }) {
   const [subTab, setSubTab] = useState("pipeline");
   const [filterH, setFilterH] = useState("ALL");
   const [filterS, setFilterS] = useState("ALL");
+  const [notification, setNotification] = useState(null);
   const [manualName, setManualName] = useState("");
   const [manualCat, setManualCat] = useState("Papelaria");
   const [manualPrice, setManualPrice] = useState("");
@@ -343,10 +360,17 @@ export default function Radar({ skus, idealSlots, onSendToEvaluator }) {
         false
       );
       const scoreData = parseJSON(scoreRaw) || {};
+      // Calculate Loop Score (the ONLY scoring system)
+      const dims = p.dims || { l: 10, w: 5, h: 5 };
+      const ls = (p.priceEstBRL && p.costEstBRL && p.category) 
+        ? calcScore(p.priceEstBRL, p.costEstBRL, 24, dims, p.category) : null;
+      const loopRec = ls?.rec || "REVISAR";
+      // Map Loop rec to Radar status
+      const statusMap = { "AMPLIAR": "CANDIDATO", "MANTER": "WATCHLIST", "REVISAR": "WATCHLIST", "CORTAR": "DESCARTA" };
       scored.push({
         id: genId(), ...p, ...scoreData,
         radarScore: scoreData.totalScore || null,
-        status: (scoreData.totalScore || 0) >= 7 ? "CANDIDATO" : (scoreData.totalScore || 0) >= 5 ? "WATCHLIST" : "DESCARTA",
+        status: statusMap[loopRec] || "WATCHLIST",
         detectedDate: today(), horizon
       });
     }
@@ -356,10 +380,14 @@ export default function Radar({ skus, idealSlots, onSendToEvaluator }) {
       const names = new Set(prev.map(c => c.name?.toLowerCase()));
       const newOnes = scored.filter(s => s.name && !names.has(s.name.toLowerCase()));
       log(`✅ ${horizon} completo: ${newOnes.length} novos de ${scored.length} avaliados`);
+      // Show notification
+      setNotification({ type: "success", msg: `Varredura ${horizon} completa: ${newOnes.length} novos produtos encontrados`, ts: Date.now() });
+      setTimeout(() => setNotification(null), 8000);
       return [...newOnes, ...prev];
     });
 
     setLoading(prev => ({ ...prev, [horizon]: false }));
+    setSubTab("pipeline"); // Auto-switch to pipeline to see results
   };
 
   const runFullScan = async () => {
@@ -402,17 +430,26 @@ export default function Radar({ skus, idealSlots, onSendToEvaluator }) {
     );
     const scoreData = parseJSON(scoreRaw) || {};
 
+    // Calculate Loop Score for status
+    const loopScoreMan = (product.priceEstBRL && product.costEstBRL && product.category)
+      ? calcScore(product.priceEstBRL, product.costEstBRL, 24, product.dims, product.category) : null;
+    const manRec = loopScoreMan?.rec || "REVISAR";
+    const statusMap = { "AMPLIAR": "CANDIDATO", "MANTER": "WATCHLIST", "REVISAR": "WATCHLIST", "CORTAR": "DESCARTA" };
+
     const candidate = {
       id: genId(), ...product, ...scoreData,
       radarScore: scoreData.totalScore || null,
-      status: "CANDIDATO",
+      status: statusMap[manRec] || "WATCHLIST",
       detectedDate: today(),
       horizon: "H1"
     };
 
     setCandidates(prev => [candidate, ...prev]);
-    log(`✅ ${manualName}: Score ${candidate.radarScore || "?"}`);
+    log(`✅ ${manualName}: Loop Score ${loopScoreMan ? loopScoreMan.score.toFixed(1) : "?"} — ${loopScoreMan?.rec || "?"}`);
+    setNotification({ type: "success", msg: `${manualName} analisado: ${loopScoreMan?.rec || "PENDENTE"}`, ts: Date.now() });
+    setTimeout(() => setNotification(null), 6000);
     setManualName(""); setManualPrice(""); setManualCost("");
+    setSubTab("pipeline");
     setLoading(prev => ({ ...prev, manual: false }));
   };
 
@@ -444,11 +481,17 @@ export default function Radar({ skus, idealSlots, onSendToEvaluator }) {
     return candidates
       .filter(c => filterH === "ALL" || c.horizon === filterH)
       .filter(c => filterS === "ALL" || c.status === filterS)
+      .map(c => {
+        // Compute Loop Score for sorting
+        const ls = (c.priceEstBRL && c.costEstBRL && c.category) 
+          ? calcScore(c.priceEstBRL, c.costEstBRL, 24, c.dims || {l:10,w:5,h:5}, c.category) : null;
+        return { ...c, _loopScore: ls?.score || 0 };
+      })
       .sort((a, b) => {
         const ord = { CANDIDATO: 0, TESTE: 1, WATCHLIST: 2, APROVADO: 3, DESCARTA: 5 };
         const oA = ord[a.status] ?? 4, oB = ord[b.status] ?? 4;
         if (oA !== oB) return oA - oB;
-        return (b.radarScore || 0) - (a.radarScore || 0);
+        return (b._loopScore || 0) - (a._loopScore || 0);
       });
   }, [candidates, filterH, filterS]);
 
@@ -474,6 +517,25 @@ export default function Radar({ skus, idealSlots, onSendToEvaluator }) {
 
   return (
     <div>
+      {/* Notification banner */}
+      {notification && (
+        <div style={{
+          background: notification.type === "success" ? "#d4edda" : "#f8d7da",
+          color: notification.type === "success" ? "#155724" : "#721c24",
+          border: `1px solid ${notification.type === "success" ? "#c3e6cb" : "#f5c6cb"}`,
+          borderRadius: 10, padding: "10px 16px", marginBottom: 12,
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          fontWeight: 600, fontSize: 13,
+          animation: "fadeIn 0.3s ease"
+        }}>
+          <span>✅ {notification.msg}</span>
+          <button onClick={() => setNotification(null)} style={{
+            background: "none", border: "none", fontSize: 16, cursor: "pointer",
+            color: notification.type === "success" ? "#155724" : "#721c24"
+          }}>✕</button>
+        </div>
+      )}
+
       {/* Stats bar */}
       <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 14 }}>
         {[
